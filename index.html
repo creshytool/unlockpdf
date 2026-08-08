@@ -1,0 +1,376 @@
+<!--
+  UNLOCK PDF — TOOL (functional widget only, no marketing content)
+
+  ⚠️ The original version of this tool could never work. It called
+  `PDFDocument.load(bytes, { password, ignoreEncryption: false })` — but
+  pdf-lib has no `password` option and does not implement decryption at all.
+  `ignoreEncryption: true` only suppresses pdf-lib's error; it leaves the
+  page content streams as raw ciphertext ("blank page" is the most common
+  symptom reported against pdf-lib for exactly this). With
+  `ignoreEncryption: false` (as the original had it), pdf-lib throws on
+  every encrypted PDF unconditionally — the password field did nothing.
+  This rewrite uses a real decryption engine (@pdfsmaller/pdf-decrypt,
+  companion to the encryption library used in the Protect-PDF tool) and
+  independently re-opens the result with pdf.js to confirm it actually
+  worked before ever offering a download.
+
+  Requires network access to:
+    - unpkg.com/pdf-lib (encryption detection on upload)
+    - cdnjs.cloudflare.com/pdf.js (verifying the unlocked output opens cleanly)
+    - esm.sh/@pdfsmaller/pdf-decrypt — pinned to an EXACT version. This
+      package has no published changelog to audit yet, so treat it with the
+      same caution as a brand-new dependency: never loosen this pin without
+      re-reading its source, and never trust its output without the
+      verification step below.
+-->
+<div class="tool-wrapper" id="unlockpdf-root">
+    <div class="converter-card">
+        <h2 class="main-title">Unlock PDF</h2>
+        <p class="main-subtitle">Remove passwords, encryption, and permission restrictions from your PDF files — verified locally before you download.</p>
+
+        <div class="tool-controls">
+            <div class="file-drop-zone" id="unlockpdf-drop-zone">
+                <input type="file" id="unlockpdf-file-input" accept="application/pdf,.pdf" style="display:none;" aria-label="Select locked PDF">
+                <label for="unlockpdf-file-input" class="file-label">
+                    <span class="icon" aria-hidden="true">🔓</span>
+                    <span id="unlockpdf-label-text">Select Locked PDF</span>
+                </label>
+                <p class="hint-text">Max file size 25MB. Your file never leaves your browser.</p>
+            </div>
+
+            <div id="unlockpdf-detect-banner" class="detect-banner" style="display:none;"></div>
+
+            <div id="unlockpdf-options" class="options-panel" style="display:none;">
+                <div id="unlockpdf-password-block">
+                    <div class="input-group">
+                        <label>This PDF requires a password to open. Enter the user or owner password:</label>
+                        <div class="pass-field">
+                            <input type="password" id="unlockpdf-password" placeholder="Enter password" class="text-input" autocomplete="current-password">
+                            <button type="button" class="eye-btn" id="unlockpdf-eye-btn" aria-label="Show password">👁</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="input-group">
+                    <label>Output File Name</label>
+                    <input type="text" id="unlockpdf-filename" class="text-input" placeholder="unlocked-document">
+                </div>
+
+                <button type="button" id="unlockpdf-process-btn" class="action-btn">Unlock &amp; Verify PDF</button>
+                <button type="button" id="unlockpdf-reset-btn" class="secondary-btn full-width-btn">Start Over</button>
+            </div>
+        </div>
+
+        <div id="unlockpdf-status-bar" class="status-msg" role="status" aria-live="polite"></div>
+
+        <div id="unlockpdf-result-area" class="download-section" style="display:none;">
+            <div class="success-icon" aria-hidden="true">🔓</div>
+            <p id="unlockpdf-result-text">The PDF has been decrypted and unlocked!</p>
+            <p class="hint-text" id="unlockpdf-verify-note">✔ Verified locally: the output file was re-opened with pdf.js to confirm it opens with no password before this download was offered.</p>
+            <div id="unlockpdf-download-links-container"></div>
+        </div>
+    </div>
+</div>
+
+<style>
+    #unlockpdf-root { --unlockpdf-primary: #f39c12; --unlockpdf-secondary: #2c3e50; --unlockpdf-success: #27ae60; }
+    #unlockpdf-root.tool-wrapper { font-family: 'Segoe UI', Arial, sans-serif; max-width: 850px; margin: 0 auto; color: #444; box-sizing: border-box; }
+    #unlockpdf-root *, #unlockpdf-root *::before, #unlockpdf-root *::after { box-sizing: border-box; }
+    #unlockpdf-root .converter-card { background: #fff; padding: 40px 20px; border-radius: 20px; box-shadow: 0 15px 35px rgba(0,0,0,0.1); text-align: center; border-top: 5px solid var(--unlockpdf-primary); }
+    #unlockpdf-root .main-title { font-size: 28px; color: var(--unlockpdf-secondary); margin-bottom: 10px; }
+    #unlockpdf-root .main-subtitle { font-size: 15px; color: #777; margin-bottom: 20px; }
+
+    #unlockpdf-root .file-drop-zone { border: 2px dashed #cbd5e0; padding: 40px 20px; border-radius: 15px; cursor: pointer; transition: 0.3s; background: #fdfdfd; margin-bottom: 20px; }
+    #unlockpdf-root .file-drop-zone.dragover { border-color: var(--unlockpdf-primary); background: #fef9f3; }
+    #unlockpdf-root .file-drop-zone:hover { border-color: var(--unlockpdf-primary); background: #fef9f3; }
+    #unlockpdf-root .file-label { display: flex; flex-direction: column; align-items: center; gap: 8px; cursor: pointer; font-weight: 600; color: var(--unlockpdf-secondary); }
+    #unlockpdf-root .icon { font-size: 40px; }
+    #unlockpdf-root .hint-text { font-size: 12px; color: #888; margin: 6px 0; text-align: left; }
+
+    #unlockpdf-root .detect-banner { padding: 14px 16px; border-radius: 10px; font-size: 13px; font-weight: 600; text-align: left; margin-bottom: 16px; }
+    #unlockpdf-root .detect-banner.info { background: #eef6fb; border: 1px solid #bcdff0; color: #1f5f7a; }
+    #unlockpdf-root .detect-banner.ok { background: #f0fff4; border: 1px solid #b7e4c7; color: #1f6a3f; }
+    #unlockpdf-root .detect-banner.warn { background: #fff8e6; border: 1px solid #f0c419; color: #7a5b00; }
+
+    #unlockpdf-root .options-panel { background: #f8fafc; padding: 25px; border-radius: 12px; border: 1px solid #edf2f7; text-align: left; }
+    #unlockpdf-root .input-group { margin-bottom: 14px; }
+    #unlockpdf-root .input-group label { display: block; font-size: 14px; font-weight: 600; margin-bottom: 6px; color: #555; }
+    #unlockpdf-root .text-input { width: 100%; padding: 12px; border-radius: 8px; border: 1px solid #ddd; font-size: 15px; box-sizing: border-box; background: #fff; color: #333; }
+
+    #unlockpdf-root .pass-field { position: relative; }
+    #unlockpdf-root .pass-field .text-input { padding-right: 44px; }
+    #unlockpdf-root .eye-btn { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); background: transparent; border: none; cursor: pointer; font-size: 16px; padding: 6px; }
+
+    #unlockpdf-root .action-btn { background: var(--unlockpdf-primary); color: #fff; border: none; padding: 16px; border-radius: 10px; font-weight: bold; cursor: pointer; width: 100%; font-size: 18px; margin-top: 20px; transition: 0.3s; }
+    #unlockpdf-root .action-btn:hover { background: #d35400; }
+    #unlockpdf-root .action-btn:disabled { opacity: 0.6; cursor: not-allowed; }
+    #unlockpdf-root .secondary-btn { background: #ecf0f1; color: var(--unlockpdf-secondary); border: 1px solid #ccc; padding: 10px 20px; border-radius: 6px; cursor: pointer; font-weight: 600; }
+    #unlockpdf-root .secondary-btn:hover { background: #dfe6e9; }
+    #unlockpdf-root .full-width-btn { width: 100%; margin-top: 10px; }
+
+    #unlockpdf-root .status-msg { margin: 20px 0; font-weight: 600; color: var(--unlockpdf-primary); min-height: 20px; }
+    #unlockpdf-root .status-msg.error { color: #c0392b; }
+    #unlockpdf-root .download-section { background: #f0fff4; padding: 25px; border-radius: 15px; border: 1px dashed var(--unlockpdf-success); text-align: center; margin-top: 20px; }
+    #unlockpdf-root .download-section .hint-text { text-align: center; }
+    #unlockpdf-root .download-link, #unlockpdf-root .preview-link { display: inline-block; padding: 12px 30px; border-radius: 8px; text-decoration: none; font-weight: bold; margin: 15px 6px 0; cursor: pointer; border: none; font-size: 15px; }
+    #unlockpdf-root .download-link { background: var(--unlockpdf-success); color: #fff; }
+    #unlockpdf-root .download-link:hover { background: #1f8a44; }
+    #unlockpdf-root .preview-link { background: var(--unlockpdf-secondary); color: #fff; }
+    #unlockpdf-root .preview-link:hover { background: #1c2833; }
+</style>
+
+<script src="https://unpkg.com/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+
+<script>
+(function() {
+    if (typeof pdfjsLib !== 'undefined') {
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    }
+
+    const root = document.getElementById('unlockpdf-root');
+    const fileInput = root.querySelector('#unlockpdf-file-input');
+    const dropZone = root.querySelector('#unlockpdf-drop-zone');
+    const labelText = root.querySelector('#unlockpdf-label-text');
+    const detectBanner = root.querySelector('#unlockpdf-detect-banner');
+    const optionsPanel = root.querySelector('#unlockpdf-options');
+    const passwordBlock = root.querySelector('#unlockpdf-password-block');
+    const passwordInput = root.querySelector('#unlockpdf-password');
+    const eyeBtn = root.querySelector('#unlockpdf-eye-btn');
+    const filenameInput = root.querySelector('#unlockpdf-filename');
+    const processBtn = root.querySelector('#unlockpdf-process-btn');
+    const resetBtn = root.querySelector('#unlockpdf-reset-btn');
+    const status = root.querySelector('#unlockpdf-status-bar');
+    const resultArea = root.querySelector('#unlockpdf-result-area');
+    const resultText = root.querySelector('#unlockpdf-result-text');
+    const verifyNote = root.querySelector('#unlockpdf-verify-note');
+    const linksContainer = root.querySelector('#unlockpdf-download-links-container');
+
+    let currentFile = null;
+    let currentFileBytes = null;
+    let baseFileName = 'unlocked-document';
+    let notEncrypted = false;
+    let decryptPDFFn = null;
+    let isEncryptedFn = null;
+    let lastObjectUrls = [];
+
+    function showStatus(msg, isError) {
+        status.textContent = msg || '';
+        status.className = 'status-msg' + (isError ? ' error' : '');
+    }
+
+    function revokeOldUrls() {
+        lastObjectUrls.forEach(u => { try { URL.revokeObjectURL(u); } catch (e) {} });
+        lastObjectUrls = [];
+    }
+
+    /* ---------------- FILE UPLOAD ---------------- */
+
+    ['dragenter', 'dragover'].forEach(evt => dropZone.addEventListener(evt, (e) => { e.preventDefault(); dropZone.classList.add('dragover'); }));
+    ['dragleave', 'drop'].forEach(evt => dropZone.addEventListener(evt, (e) => { e.preventDefault(); dropZone.classList.remove('dragover'); }));
+    dropZone.addEventListener('drop', (e) => {
+        const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+        if (f) { fileInput.files = e.dataTransfer.files; handleFile(f); }
+    });
+    fileInput.addEventListener('change', (e) => { const file = e.target.files[0]; if (file) handleFile(file); });
+
+    async function handleFile(file) {
+        if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) {
+            showStatus('Please select a valid PDF file.', true);
+            return;
+        }
+        if (file.size > 25 * 1024 * 1024) {
+            showStatus('File is too large. Please select a PDF under 25MB.', true);
+            return;
+        }
+
+        currentFile = file;
+        baseFileName = file.name.replace(/\.[^/.]+$/, '');
+        filenameInput.value = baseFileName + '_unlocked';
+        labelText.textContent = file.name;
+        resultArea.style.display = 'none';
+        detectBanner.style.display = 'none';
+        notEncrypted = false;
+        showStatus('Checking file...');
+
+        try {
+            const arrayBuffer = await file.arrayBuffer();
+            currentFileBytes = new Uint8Array(arrayBuffer);
+
+            const { isEncrypted } = await ensureDecryptLib();
+            const info = await isEncrypted(currentFileBytes.slice(0));
+
+            optionsPanel.style.display = 'block';
+
+            if (!info.encrypted) {
+                notEncrypted = true;
+                passwordBlock.style.display = 'none';
+                detectBanner.className = 'detect-banner ok';
+                detectBanner.textContent = "Good news — this PDF isn't encrypted or password protected. There's nothing to unlock, but you can still use the button below to get a clean copy.";
+                detectBanner.style.display = 'block';
+                processBtn.textContent = 'Download As-Is';
+            } else {
+                passwordBlock.style.display = 'block';
+                processBtn.textContent = 'Unlock & Verify PDF';
+                // AES-128 (V=4, R=4) is a known gap in the decrypt engine —
+                // surface that clearly instead of letting it fail opaquely.
+                if (info.version === 4) {
+                    detectBanner.className = 'detect-banner warn';
+                    detectBanner.textContent = 'This PDF uses AES-128 encryption, which this tool does not support yet. Unlocking will likely fail — you may need a different tool or to re-export the PDF from its original source.';
+                    detectBanner.style.display = 'block';
+                } else {
+                    detectBanner.className = 'detect-banner info';
+                    detectBanner.textContent = 'This PDF is encrypted with ' + (info.algorithm || 'password') + ' protection. Enter the password below to remove it.';
+                    detectBanner.style.display = 'block';
+                }
+            }
+            showStatus('');
+        } catch (err) {
+            console.error(err);
+            optionsPanel.style.display = 'block';
+            passwordBlock.style.display = 'block';
+            showStatus('Could not automatically check this file\'s encryption — you can still try entering a password below.', true);
+        }
+    }
+
+    /* ---------------- SHOW / HIDE PASSWORD ---------------- */
+
+    eyeBtn.addEventListener('click', () => {
+        if (passwordInput.type === 'password') { passwordInput.type = 'text'; eyeBtn.textContent = '🙈'; }
+        else { passwordInput.type = 'password'; eyeBtn.textContent = '👁'; }
+    });
+
+    /* ---------------- LAZY-LOAD DECRYPTION ENGINE (exact version pinned) ---------------- */
+
+    async function ensureDecryptLib() {
+        if (decryptPDFFn && isEncryptedFn) return { decryptPDF: decryptPDFFn, isEncrypted: isEncryptedFn };
+        // Pinned to an EXACT version, same discipline as the Protect-PDF
+        // tool's encryption engine. This package has no published changelog
+        // yet — do not loosen this pin without re-auditing the source.
+        const mod = await import('https://esm.sh/@pdfsmaller/pdf-decrypt@1.0.1');
+        decryptPDFFn = mod.decryptPDF;
+        isEncryptedFn = mod.isEncrypted;
+        return { decryptPDF: decryptPDFFn, isEncrypted: isEncryptedFn };
+    }
+
+    /* ---------------- VERIFY OUTPUT BEFORE OFFERING DOWNLOAD ----------------
+       Independently re-open the "unlocked" bytes with pdf.js and confirm they
+       open with NO password. Don't just trust the decrypt call succeeded —
+       a library bug could silently return corrupted or still-encrypted bytes. */
+    async function verifyUnlockedOutput(bytes) {
+        if (typeof pdfjsLib === 'undefined') return { ok: true, skipped: true };
+        try {
+            const doc = await pdfjsLib.getDocument({ data: bytes.slice(0) }).promise;
+            if (!doc || !doc.numPages || doc.numPages < 1) {
+                return { ok: false, reason: 'The unlocked file has no readable pages — something went wrong during decryption.' };
+            }
+            return { ok: true };
+        } catch (e) {
+            if (e && e.name === 'PasswordException') {
+                return { ok: false, reason: 'Verification failed: the output still requires a password, so it was not fully unlocked.' };
+            }
+            return { ok: false, reason: 'The unlocked file could not be re-opened for verification (' + (e && e.message ? e.message : 'unknown error') + ').' };
+        }
+    }
+
+    /* ---------------- MAIN ACTION ---------------- */
+
+    processBtn.addEventListener('click', async () => {
+        if (!currentFile || !currentFileBytes) { showStatus('Please select a PDF file first.', true); return; }
+
+        processBtn.disabled = true;
+
+        try {
+            let outputBytes;
+
+            if (notEncrypted) {
+                showStatus('Preparing file...');
+                outputBytes = currentFileBytes.slice(0);
+            } else {
+                const password = passwordInput.value;
+                showStatus('Loading decryption engine...');
+                const { decryptPDF } = await ensureDecryptLib();
+
+                showStatus('Decrypting document...');
+                outputBytes = await decryptPDF(currentFileBytes.slice(0), password);
+
+                showStatus('Verifying the unlocked file opens correctly...');
+                const verify = await verifyUnlockedOutput(outputBytes);
+                if (!verify.ok) {
+                    showStatus(verify.reason || 'Verification failed — the file was not downloaded. Please try again.', true);
+                    processBtn.disabled = false;
+                    return;
+                }
+                verifyNote.style.display = verify.skipped ? 'none' : 'block';
+            }
+
+            if (notEncrypted) verifyNote.style.display = 'none';
+
+            const blob = new Blob([outputBytes], { type: 'application/pdf' });
+            const url = URL.createObjectURL(blob);
+            revokeOldUrls();
+            lastObjectUrls.push(url);
+
+            const outName = (filenameInput.value.trim() || (baseFileName + '_unlocked')).replace(/\.pdf$/i, '') + '.pdf';
+
+            linksContainer.innerHTML = '';
+
+            if (!notEncrypted) {
+                const previewBtn = document.createElement('button');
+                previewBtn.type = 'button';
+                previewBtn.className = 'preview-link';
+                previewBtn.textContent = 'Preview Unlocked PDF';
+                previewBtn.addEventListener('click', () => window.open(url, '_blank'));
+                linksContainer.appendChild(previewBtn);
+            }
+
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = outName;
+            a.className = 'download-link';
+            a.textContent = notEncrypted ? 'Download PDF' : 'Download Unlocked PDF';
+            linksContainer.appendChild(a);
+
+            resultText.textContent = notEncrypted
+                ? 'This PDF was not encrypted, so nothing needed to change — here is your file.'
+                : 'The PDF has been decrypted and unlocked!';
+
+            showStatus('');
+            resultArea.style.display = 'block';
+            resultArea.scrollIntoView({ behavior: 'smooth' });
+        } catch (err) {
+            console.error(err);
+            const msg = (err && err.message) || '';
+            if (msg.includes('Incorrect password')) {
+                showStatus('Incorrect password. Please check it and try again.', true);
+            } else if (msg.includes('not encrypted')) {
+                showStatus("This PDF isn't encrypted — there's nothing to unlock.", true);
+            } else if (msg.includes('Unsupported encryption')) {
+                showStatus('This PDF uses an encryption method this tool does not support yet (' + msg + ').', true);
+            } else {
+                showStatus('Could not unlock this document. Please check the file and password, and try again.', true);
+            }
+        } finally {
+            processBtn.disabled = false;
+        }
+    });
+
+    resetBtn.addEventListener('click', () => {
+        currentFile = null;
+        currentFileBytes = null;
+        notEncrypted = false;
+        fileInput.value = '';
+        passwordInput.value = '';
+        passwordInput.type = 'password';
+        eyeBtn.textContent = '👁';
+        labelText.textContent = 'Select Locked PDF';
+        optionsPanel.style.display = 'none';
+        passwordBlock.style.display = 'block';
+        detectBanner.style.display = 'none';
+        resultArea.style.display = 'none';
+        processBtn.textContent = 'Unlock & Verify PDF';
+        revokeOldUrls();
+        showStatus('');
+    });
+})();
+</script>
